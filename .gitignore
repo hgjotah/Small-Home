@@ -1,0 +1,41 @@
+# Android / Gradle
+.gradle/
+.idea/
+**/build/
+local.properties
+captures/
+.externalNativeBuild/
+.cxx/
+*.iml
+
+# Build artifacts
+*.apk
+*.aab
+output-metadata.json
+
+# Signing material
+*.jks
+*.keystore
+*.p12
+*.pem
+keystore.properties
+signing.properties
+
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+secrets.properties
+credentials.json
+google-services.json
+*.secrets
+
+# Arduino / editors / OS
+*.bin
+*.elf
+*.map
+.arduinoIDE/
+.vscode/
+Thumbs.db
+.DS_Store
+

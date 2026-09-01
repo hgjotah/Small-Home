@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- Algunos usuarios descubren entidades en un Home Assistant local por HTTP.
+         SmartPanel nunca usa esta excepción: Android se comunica con él solo por BLE. -->
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
