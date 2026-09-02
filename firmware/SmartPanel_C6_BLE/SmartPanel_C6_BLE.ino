@@ -36,8 +36,10 @@
     - Secret unlock: CENTER -> LEFT -> RIGHT, no final confirmation.
     - LEFT+RIGHT = Back.
     - Auto-lock after 60 seconds of inactivity, but screen stays on.
-    - Hold CENTER+RIGHT for 1.2 s = lock + backlight off.
+    - Press all three buttons together = lock + backlight off from any screen.
       Any button wakes it; that wake press is fully ignored.
+    - Local notes: up to 8 persistent notes, each with a title and content. Notes
+      are created, edited, read and scrolled entirely on the panel without BLE/Wi-Fi.
     - Notifications: last 10, sent from Android through BLE.
       CENTER on notification asks Android to mark-as-read/dismiss and removes it locally.
     - Home Assistant: ESP connects directly over Wi-Fi and uses the official REST API:
@@ -152,6 +154,11 @@ static const uint16_t C_BIRD_OR  = RGB565(255, 145, 54);
 static const uint8_t  PROTOCOL_VERSION = 2;
 static const uint8_t  MAX_LIGHTS = 10;
 static const uint8_t  MAX_NOTIFICATIONS = 10;
+static const uint8_t  MAX_NOTES = 8;
+static const uint8_t  MAX_NOTE_TITLE = 36;
+static const uint16_t MAX_NOTE_CONTENT = 900;
+static const uint8_t  NOTE_MAX_LINES = 120;
+static const uint8_t  NOTE_LINES_PER_PAGE = 9;
 static const uint16_t MAX_AI_QUERY = 320;
 static const uint16_t MAX_AI_RESPONSE = 1800;
 static const uint8_t  AI_MAX_LINES = 110;
@@ -169,7 +176,6 @@ static const char *BLE_TX_UUID      = "98d56a10-7c6d-4f5d-9af0-5a6b26aa1002"; //
 // Timings
 // -----------------------------------------------------------------------------
 static const uint32_t AUTO_LOCK_MS        = 60UL * 1000UL;
-static const uint32_t SCREEN_OFF_HOLD_MS  = 1200UL;
 static const uint32_t MOBILE_TIMEOUT_MS   = 45UL * 1000UL;
 static const uint32_t WIFI_RETRY_MS       = 12UL * 1000UL;
 static const uint32_t BUTTON_DEBOUNCE_MS  = 22UL;
@@ -226,6 +232,28 @@ uint8_t notificationCount = 0;
 uint8_t notificationIndex = 0;
 
 // -----------------------------------------------------------------------------
+// Local notes (stored only in ESP32 NVS)
+// -----------------------------------------------------------------------------
+struct LocalNote {
+  String title;
+  String content;
+};
+
+LocalNote notes[MAX_NOTES];
+uint8_t noteCount = 0;
+uint8_t noteIndex = 0;
+uint8_t noteEditingIndex = 0;
+bool noteEditingNew = false;
+bool noteEditingTitle = true;
+bool noteUpper = false;
+uint8_t noteKeyboardIndex = 0;
+String noteDraftTitle;
+String noteDraftContent;
+String noteLines[NOTE_MAX_LINES];
+uint8_t noteLineCount = 0;
+uint8_t notePage = 0;
+
+// -----------------------------------------------------------------------------
 // UI state
 // -----------------------------------------------------------------------------
 enum ScreenState : uint8_t {
@@ -237,13 +265,16 @@ enum ScreenState : uint8_t {
   SCREEN_AI_KEYBOARD,
   SCREEN_AI_WAIT,
   SCREEN_AI_RESPONSE,
-  SCREEN_FLAPPY
+  SCREEN_FLAPPY,
+  SCREEN_NOTES_LIST,
+  SCREEN_NOTE_EDITOR,
+  SCREEN_NOTE_VIEW
 };
 
 ScreenState screen = SCREEN_HOME_LOCKED;
 bool unlocked = false;
 uint8_t menuIndex = 0;
-static const uint8_t MENU_COUNT = 5;
+static const uint8_t MENU_COUNT = 6;
 static const uint8_t UNLOCK_SEQ[3] = {0x02, 0x01, 0x04}; // CENTER, LEFT, RIGHT
 uint8_t unlockPos = 0;
 
@@ -260,7 +291,6 @@ int lastHomeMinute = -1;
 bool displaySleeping = false;
 bool sleepCanWake = false;
 bool discardButtonsUntilRelease = false;
-uint32_t screenOffChordStartedAt = 0;
 
 // -----------------------------------------------------------------------------
 // BLE state
@@ -596,6 +626,36 @@ void loadConfig() {
   }
 
   flappyHighScore = prefs.getULong("flapHi", 0);
+
+  noteCount = prefs.getUChar("noteCnt", 0);
+  if (noteCount > MAX_NOTES) noteCount = MAX_NOTES;
+  for (uint8_t i = 0; i < noteCount; i++) {
+    String titleKey = "nTitle" + String(i);
+    String bodyKey = "nBody" + String(i);
+    notes[i].title = prefs.getString(titleKey.c_str(), "Sin titulo");
+    notes[i].content = prefs.getString(bodyKey.c_str(), "");
+    if (notes[i].title.length() > MAX_NOTE_TITLE) {
+      notes[i].title = notes[i].title.substring(0, MAX_NOTE_TITLE);
+    }
+    if (notes[i].content.length() > MAX_NOTE_CONTENT) {
+      notes[i].content = notes[i].content.substring(0, MAX_NOTE_CONTENT);
+    }
+  }
+}
+
+void saveNotes() {
+  prefs.putUChar("noteCnt", noteCount);
+  for (uint8_t i = 0; i < MAX_NOTES; i++) {
+    String titleKey = "nTitle" + String(i);
+    String bodyKey = "nBody" + String(i);
+    if (i < noteCount) {
+      prefs.putString(titleKey.c_str(), notes[i].title);
+      prefs.putString(bodyKey.c_str(), notes[i].content);
+    } else {
+      prefs.remove(titleKey.c_str());
+      prefs.remove(bodyKey.c_str());
+    }
+  }
 }
 
 void saveConfig() {
@@ -1855,6 +1915,209 @@ void aiKeyboardSelect() {
 }
 
 // -----------------------------------------------------------------------------
+// Local notes
+// -----------------------------------------------------------------------------
+void pushNoteLine(const String &line) {
+  if (noteLineCount < NOTE_MAX_LINES) noteLines[noteLineCount++] = line;
+}
+
+void buildNoteWrappedLines() {
+  noteLineCount = 0;
+  if (noteIndex >= noteCount) {
+    pushNoteLine("");
+    return;
+  }
+
+  String source = asciiSafe(notes[noteIndex].content);
+  source.replace("\r", "");
+  if (source.isEmpty()) {
+    pushNoteLine("(Sin contenido)");
+    return;
+  }
+
+  const uint8_t width = 47;
+  String line;
+  String word;
+
+  for (size_t i = 0; i <= source.length(); i++) {
+    char c = (i < source.length()) ? source[i] : ' ';
+
+    if (c == '\n') {
+      if (!word.isEmpty()) {
+        if (!line.isEmpty() && line.length() + 1 + word.length() > width) {
+          pushNoteLine(line);
+          line = word;
+        } else {
+          if (!line.isEmpty()) line += ' ';
+          line += word;
+        }
+        word = "";
+      }
+      pushNoteLine(line);
+      line = "";
+      continue;
+    }
+
+    if (c == ' ' || i == source.length()) {
+      if (!word.isEmpty()) {
+        if (word.length() > width) {
+          if (!line.isEmpty()) {
+            pushNoteLine(line);
+            line = "";
+          }
+          while (word.length() > width && noteLineCount < NOTE_MAX_LINES) {
+            pushNoteLine(word.substring(0, width));
+            word.remove(0, width);
+          }
+        }
+
+        if (!word.isEmpty()) {
+          if (!line.isEmpty() && line.length() + 1 + word.length() > width) {
+            pushNoteLine(line);
+            line = word;
+          } else {
+            if (!line.isEmpty()) line += ' ';
+            line += word;
+          }
+        }
+      }
+      word = "";
+    } else {
+      word += c;
+    }
+  }
+
+  if (!line.isEmpty()) pushNoteLine(line);
+  if (noteLineCount == 0) pushNoteLine("");
+}
+
+char noteKeyboardLetter(uint8_t idx) {
+  char c = 'a' + idx;
+  return noteUpper ? toupper(c) : c;
+}
+
+String noteKeyboardLabel(uint8_t idx) {
+  if (idx < 26) return String(noteKeyboardLetter(idx));
+  switch (idx) {
+    case 26: return "^";
+    case 27: return "_";
+    case 28: return "<";
+    case 29: return ".";
+    case 30: return ",";
+    case 31: return "?";
+    case 32: return "!";
+    case 33: return "NL";
+    default: return "";
+  }
+}
+
+void beginNewNote() {
+  if (noteCount >= MAX_NOTES) {
+    showToast("Limite de 8 notas", 1800);
+    return;
+  }
+
+  noteEditingIndex = noteCount;
+  noteEditingNew = true;
+  noteEditingTitle = true;
+  noteUpper = false;
+  noteKeyboardIndex = 0;
+  noteDraftTitle = "";
+  noteDraftContent = "";
+  screen = SCREEN_NOTE_EDITOR;
+}
+
+void beginEditNote() {
+  if (noteIndex >= noteCount) return;
+  noteEditingIndex = noteIndex;
+  noteEditingNew = false;
+  noteEditingTitle = true;
+  noteUpper = false;
+  noteKeyboardIndex = 0;
+  noteDraftTitle = notes[noteIndex].title;
+  noteDraftContent = notes[noteIndex].content;
+  screen = SCREEN_NOTE_EDITOR;
+}
+
+void openCurrentNote() {
+  if (noteIndex >= noteCount) return;
+  notePage = 0;
+  buildNoteWrappedLines();
+  screen = SCREEN_NOTE_VIEW;
+}
+
+void saveEditedNote() {
+  if (noteEditingIndex >= MAX_NOTES) return;
+
+  noteDraftTitle.trim();
+  if (noteDraftTitle.isEmpty()) noteDraftTitle = "Sin titulo";
+  if (noteDraftTitle.length() > MAX_NOTE_TITLE) {
+    noteDraftTitle = noteDraftTitle.substring(0, MAX_NOTE_TITLE);
+  }
+  if (noteDraftContent.length() > MAX_NOTE_CONTENT) {
+    noteDraftContent = noteDraftContent.substring(0, MAX_NOTE_CONTENT);
+  }
+
+  notes[noteEditingIndex].title = noteDraftTitle;
+  notes[noteEditingIndex].content = noteDraftContent;
+  if (noteEditingNew && noteEditingIndex == noteCount) noteCount++;
+  saveNotes();
+
+  noteIndex = noteEditingIndex;
+  noteEditingNew = false;
+  notePage = 0;
+  buildNoteWrappedLines();
+  screen = SCREEN_NOTE_VIEW;
+  showToast("Nota guardada", 1200);
+}
+
+void toggleNoteEditorField() {
+  noteEditingTitle = !noteEditingTitle;
+  showToast(noteEditingTitle ? "Editando titulo" : "Editando contenido", 900);
+}
+
+void noteKeyboardSelect() {
+  String *target = noteEditingTitle ? &noteDraftTitle : &noteDraftContent;
+  size_t limit = noteEditingTitle ? MAX_NOTE_TITLE : MAX_NOTE_CONTENT;
+
+  if (noteKeyboardIndex < 26) {
+    if (target->length() < limit) *target += noteKeyboardLetter(noteKeyboardIndex);
+    return;
+  }
+
+  switch (noteKeyboardIndex) {
+    case 26:
+      noteUpper = !noteUpper;
+      break;
+    case 27:
+      if (target->length() < limit) *target += ' ';
+      break;
+    case 28:
+      if (!target->isEmpty()) target->remove(target->length() - 1);
+      break;
+    case 29:
+      if (target->length() < limit) *target += '.';
+      break;
+    case 30:
+      if (target->length() < limit) *target += ',';
+      break;
+    case 31:
+      if (target->length() < limit) *target += '?';
+      break;
+    case 32:
+      if (target->length() < limit) *target += '!';
+      break;
+    case 33:
+      if (!noteEditingTitle && target->length() < limit) {
+        *target += '\n';
+      } else if (noteEditingTitle) {
+        showToast("NL solo en contenido", 1000);
+      }
+      break;
+  }
+}
+
+// -----------------------------------------------------------------------------
 // BLE JSON message handler
 // -----------------------------------------------------------------------------
 void applyConfigFromJson(JsonVariantConst root) {
@@ -2288,10 +2551,6 @@ void drawHome() {
     gfx->print("IZQ+OK actualiza");
   }
 
-  gfx->setTextSize(1);
-  gfx->setTextColor(C_BLUE);
-  gfx->setCursor(53, 145);
-  gfx->print("CENTRO > IZQ > DER  para desbloquear");
   drawToastOverlay();
 }
 
@@ -2326,12 +2585,19 @@ void drawMenuIcon(uint8_t idx, int16_t cx, int16_t cy, uint16_t color) {
       gfx->fillCircle(cx + 8, cy - 4, 2, C_WHITE);
       gfx->fillTriangle(cx + 10, cy, cx + 18, cy + 2, cx + 10, cy + 4, C_BIRD_OR);
       break;
+    case 5:
+      gfx->fillRoundRect(cx - 13, cy - 15, 26, 30, 4, C_SURFACE2);
+      gfx->drawRoundRect(cx - 13, cy - 15, 26, 30, 4, color);
+      gfx->drawFastHLine(cx - 7, cy - 7, 15, color);
+      gfx->drawFastHLine(cx - 7, cy, 15, color);
+      gfx->drawFastHLine(cx - 7, cy + 7, 11, color);
+      break;
   }
 }
 
 void drawMenu() {
-  static const char *NAMES[MENU_COUNT] = {"Notificaciones", "Luces", "Termostato", "IA", "Flappy Bird"};
-  static const uint16_t COLORS[MENU_COUNT] = {C_BLUE, C_GOLD, C_RED, C_PURPLE, C_GREEN};
+  static const char *NAMES[MENU_COUNT] = {"Notificaciones", "Luces", "Termostato", "IA", "Flappy Bird", "Notas"};
+  static const uint16_t COLORS[MENU_COUNT] = {C_BLUE, C_GOLD, C_RED, C_PURPLE, C_GREEN, C_MINT};
 
   gfx->fillScreen(C_BG);
   drawHeader("PANEL", COLORS[menuIndex]);
@@ -2414,6 +2680,138 @@ void drawNotifications() {
   gfx->print(String(notificationIndex + 1) + "/" + String(notificationCount));
 
   drawFooterHint("< anterior", "OK leer/eliminar", "siguiente >");
+  drawToastOverlay();
+}
+
+void drawNotesList() {
+  gfx->fillScreen(C_BG);
+  drawHeader("NOTAS", C_MINT);
+
+  if (noteCount == 0) {
+    drawCard(10, 38, 300, 96, C_SURFACE);
+    centerText("Sin notas", 62, 2, C_MUTED);
+    centerText("CENTRO+DER para crear", 96, 1, C_MINT);
+    drawFooterHint("", "", "");
+    drawToastOverlay();
+    return;
+  }
+
+  if (noteIndex >= noteCount) noteIndex = noteCount - 1;
+  uint8_t first = 0;
+  if (noteCount > 4) {
+    first = noteIndex > 1 ? noteIndex - 1 : 0;
+    if (first + 4 > noteCount) first = noteCount - 4;
+  }
+
+  for (uint8_t row = 0; row < 4 && first + row < noteCount; row++) {
+    uint8_t index = first + row;
+    int16_t y = 34 + row * 27;
+    bool selected = index == noteIndex;
+    gfx->fillRoundRect(10, y, 300, 23, 6, selected ? C_SURFACE2 : C_SURFACE);
+    if (selected) gfx->drawRoundRect(10, y, 300, 23, 6, C_MINT);
+    gfx->setTextSize(1);
+    gfx->setTextColor(selected ? C_MINT : C_MUTED);
+    gfx->setCursor(18, y + 8);
+    gfx->print(String(index + 1));
+    gfx->setTextColor(C_TEXT);
+    gfx->setCursor(38, y + 8);
+    gfx->print(ellipsize(notes[index].title, 39));
+  }
+
+  drawFooterHint("<", "OK abrir  OK+DER +", ">");
+  drawToastOverlay();
+}
+
+void drawNoteEditor() {
+  gfx->fillScreen(C_BG);
+  drawHeader(noteEditingTitle ? "NOTA > TITULO" : "NOTA > CONTENIDO", C_MINT);
+
+  gfx->fillRoundRect(8, 31, 304, 20, 5, C_SURFACE);
+  gfx->drawRoundRect(8, 31, 304, 20, 5, noteEditingTitle ? C_MINT : C_SURFACE2);
+  gfx->setTextSize(1);
+  gfx->setTextColor(noteEditingTitle ? C_MINT : C_MUTED);
+  gfx->setCursor(14, 38);
+  gfx->print("T: ");
+  gfx->setTextColor(C_TEXT);
+  gfx->print(ellipsize(noteDraftTitle, 45));
+
+  gfx->fillRoundRect(8, 54, 304, 20, 5, C_SURFACE);
+  gfx->drawRoundRect(8, 54, 304, 20, 5, noteEditingTitle ? C_SURFACE2 : C_MINT);
+  String contentPreview = asciiSafe(noteDraftContent);
+  contentPreview.replace('\n', ' ');
+  if (contentPreview.length() > 44) contentPreview = contentPreview.substring(contentPreview.length() - 44);
+  gfx->setTextColor(noteEditingTitle ? C_MUTED : C_MINT);
+  gfx->setCursor(14, 61);
+  gfx->print("C: ");
+  gfx->setTextColor(C_TEXT);
+  gfx->print(contentPreview);
+
+  const uint8_t cols = 7;
+  const int16_t keyW = 40;
+  const int16_t keyH = 13;
+  const int16_t x0 = 12;
+  const int16_t y0 = 79;
+  for (uint8_t idx = 0; idx < 34; idx++) {
+    uint8_t row = idx / cols;
+    uint8_t col = idx % cols;
+    int16_t x = x0 + col * 43;
+    int16_t y = y0 + row * 14;
+    bool selected = idx == noteKeyboardIndex;
+    gfx->fillRoundRect(x, y, keyW, keyH, 4, selected ? C_MINT : C_SURFACE2);
+    String label = noteKeyboardLabel(idx);
+    gfx->setTextSize(1);
+    gfx->setTextColor(selected ? C_BG : C_TEXT);
+    int16_t lx = x + (keyW - (int16_t)label.length() * 6) / 2;
+    gfx->setCursor(lx, y + 3);
+    gfx->print(label);
+  }
+
+  gfx->setTextSize(1);
+  gfx->setTextColor(C_MUTED);
+  gfx->setCursor(6, 154);
+  gfx->print("OK+IZQ campo");
+  gfx->setCursor(215, 154);
+  gfx->print("IZQ+DER guardar");
+  drawToastOverlay();
+}
+
+void drawNoteView() {
+  gfx->fillScreen(C_BG);
+  drawHeader("NOTA", C_MINT);
+  if (noteIndex >= noteCount) {
+    screen = SCREEN_NOTES_LIST;
+    drawNotesList();
+    return;
+  }
+
+  uint8_t pages = noteLineCount == 0
+    ? 1
+    : (uint8_t)((noteLineCount + NOTE_LINES_PER_PAGE - 1) / NOTE_LINES_PER_PAGE);
+  if (notePage >= pages) notePage = pages - 1;
+
+  drawCard(8, 31, 304, 22, C_SURFACE2);
+  gfx->setTextSize(1);
+  gfx->setTextColor(C_MINT);
+  gfx->setCursor(15, 39);
+  gfx->print(ellipsize(notes[noteIndex].title, 38));
+  gfx->setTextColor(C_MUTED);
+  gfx->setCursor(276, 39);
+  gfx->print(String(notePage + 1) + "/" + String(pages));
+
+  drawCard(8, 56, 304, 88, C_SURFACE);
+  uint8_t start = notePage * NOTE_LINES_PER_PAGE;
+  uint8_t candidateEnd = start + NOTE_LINES_PER_PAGE;
+  uint8_t endLine = noteLineCount < candidateEnd ? noteLineCount : candidateEnd;
+  gfx->setTextSize(1);
+  gfx->setTextColor(C_TEXT);
+  int16_t y = 64;
+  for (uint8_t i = start; i < endLine; i++) {
+    gfx->setCursor(15, y);
+    gfx->print(ellipsize(noteLines[i], 47));
+    y += 9;
+  }
+
+  drawFooterHint("< subir", "OK+IZQ editar", "bajar >");
   drawToastOverlay();
 }
 
@@ -2774,6 +3172,9 @@ void drawCurrentScreen() {
     case SCREEN_NOTIFICATIONS:  drawNotifications(); break;
     case SCREEN_LIGHTS:         drawLights(); break;
     case SCREEN_CLIMATE:        drawClimate(); break;
+    case SCREEN_NOTES_LIST:     drawNotesList(); break;
+    case SCREEN_NOTE_EDITOR:    drawNoteEditor(); break;
+    case SCREEN_NOTE_VIEW:      drawNoteView(); break;
     case SCREEN_AI_KEYBOARD:    drawAiKeyboard(); break;
     case SCREEN_AI_WAIT:        drawAiWait(); break;
     case SCREEN_AI_RESPONSE:    drawAiResponse(); break;
@@ -2808,6 +3209,12 @@ void lockPanel() {
       screen == SCREEN_AI_WAIT ||
       screen == SCREEN_AI_RESPONSE) {
     endAiSession();
+  }
+
+  if (screen == SCREEN_NOTE_EDITOR) {
+    noteDraftTitle = "";
+    noteDraftContent = "";
+    noteEditingNew = false;
   }
 
   unlocked = false;
@@ -2906,6 +3313,11 @@ void activateMenuItem() {
       screen = SCREEN_FLAPPY;
       resetGame();
       break;
+
+    case 5:
+      noteIndex = 0;
+      screen = SCREEN_NOTES_LIST;
+      break;
   }
 }
 
@@ -2941,17 +3353,39 @@ void handleButtonGesture(uint8_t mask) {
 
   lastInteractionMs = millis();
 
-  // LEFT+RIGHT is Back while unlocked. On the locked home screen it is a
-  // recovery shortcut that reveals the BLE pairing PIN for a few seconds, so a
-  // replacement phone can be bonded without erasing Wi-Fi/Home Assistant config.
+  // Highest-priority global shortcut: all three buttons always lock the panel
+  // and switch off the backlight, regardless of the current screen or mode.
+  if (mask == (0x01 | 0x02 | 0x04)) {
+    turnDisplayOffAndLock();
+    return;
+  }
+
+  // Notes use chords that intentionally differ from the rest of the UI.
+  if (unlocked && screen == SCREEN_NOTES_LIST && mask == (0x02 | 0x04)) {
+    beginNewNote();
+    return;
+  }
+  if (unlocked && screen == SCREEN_NOTE_EDITOR && mask == (0x01 | 0x02)) {
+    toggleNoteEditorField();
+    return;
+  }
+  if (unlocked && screen == SCREEN_NOTE_VIEW && mask == (0x01 | 0x02)) {
+    beginEditNote();
+    return;
+  }
+  if (unlocked && screen == SCREEN_NOTE_EDITOR && mask == (0x01 | 0x04)) {
+    saveEditedNote();
+    return;
+  }
+  if (unlocked && screen == SCREEN_NOTE_VIEW && mask == (0x01 | 0x04)) {
+    screen = SCREEN_NOTES_LIST;
+    return;
+  }
+
+  // LEFT+RIGHT is Back while unlocked. It deliberately does nothing on the
+  // locked home screen, so the unlock sequence is never displayed there.
   if (mask == (0x01 | 0x04)) {
-    if (!unlocked && screen == SCREEN_HOME_LOCKED) {
-      char pinBuf[24];
-      snprintf(pinBuf, sizeof(pinBuf), "BLE PIN %06lu", (unsigned long)blePasskey);
-      showToast(String(pinBuf), 5000);
-    } else {
-      handleBackGesture();
-    }
+    if (unlocked) handleBackGesture();
     return;
   }
 
@@ -3039,6 +3473,39 @@ void handleButtonGesture(uint8_t mask) {
       }
       break;
 
+    case SCREEN_NOTES_LIST:
+      if (noteCount == 0) break;
+      if (mask == 0x01) {
+        noteIndex = (noteIndex + noteCount - 1) % noteCount;
+      } else if (mask == 0x04) {
+        noteIndex = (noteIndex + 1) % noteCount;
+      } else if (mask == 0x02) {
+        openCurrentNote();
+      }
+      break;
+
+    case SCREEN_NOTE_EDITOR:
+      if (mask == 0x01) {
+        noteKeyboardIndex = (noteKeyboardIndex + 33) % 34;
+      } else if (mask == 0x04) {
+        noteKeyboardIndex = (noteKeyboardIndex + 1) % 34;
+      } else if (mask == 0x02) {
+        noteKeyboardSelect();
+      }
+      break;
+
+    case SCREEN_NOTE_VIEW: {
+      uint8_t pages = noteLineCount == 0
+        ? 1
+        : (uint8_t)((noteLineCount + NOTE_LINES_PER_PAGE - 1) / NOTE_LINES_PER_PAGE);
+      if (mask == 0x01 && notePage > 0) {
+        notePage--;
+      } else if (mask == 0x04 && notePage + 1 < pages) {
+        notePage++;
+      }
+      break;
+    }
+
     case SCREEN_AI_KEYBOARD:
       if (mask == 0x01) {
         keyboardIndex = (keyboardIndex + 33) % 34;
@@ -3088,17 +3555,17 @@ void printButtonDiagnostic(uint8_t previousMask, uint8_t currentMask) {
   uint8_t changed = previousMask ^ currentMask;
 
   if (changed & 0x01) {
-    Serial.print("[BOTON] IZQUIERDA GPIO18 -> ");
+    Serial.print("[BOTON] IZQUIERDA GPIO3  -> ");
     Serial.println((currentMask & 0x01) ? "PULSADO" : "SUELTO");
   }
 
   if (changed & 0x02) {
-    Serial.print("[BOTON] CENTRO GPIO19    -> ");
+    Serial.print("[BOTON] CENTRO GPIO23    -> ");
     Serial.println((currentMask & 0x02) ? "PULSADO" : "SUELTO");
   }
 
   if (changed & 0x04) {
-    Serial.print("[BOTON] DERECHA GPIO20   -> ");
+    Serial.print("[BOTON] DERECHA GPIO0    -> ");
     Serial.println((currentMask & 0x04) ? "PULSADO" : "SUELTO");
   }
 
@@ -3112,19 +3579,19 @@ void printButtonDiagnostic(uint8_t previousMask, uint8_t currentMask) {
   bool first = true;
 
   if (currentMask & 0x01) {
-    Serial.print("IZQUIERDA(GPIO18)");
+    Serial.print("IZQUIERDA(GPIO3)");
     first = false;
   }
 
   if (currentMask & 0x02) {
     if (!first) Serial.print(" + ");
-    Serial.print("CENTRO(GPIO19)");
+    Serial.print("CENTRO(GPIO23)");
     first = false;
   }
 
   if (currentMask & 0x04) {
     if (!first) Serial.print(" + ");
-    Serial.print("DERECHA(GPIO20)");
+    Serial.print("DERECHA(GPIO0)");
   }
 
   Serial.println();
@@ -3174,19 +3641,11 @@ void updateButtons() {
     return;
   }
 
-  // Hold CENTER+RIGHT = explicit power-off / lock.
-  if (stableMask == (0x02 | 0x04)) {
-    if (screenOffChordStartedAt == 0) {
-      screenOffChordStartedAt = now;
-    }
-
-    if (now - screenOffChordStartedAt >= SCREEN_OFF_HOLD_MS) {
-      screenOffChordStartedAt = 0;
-      turnDisplayOffAndLock();
-      return;
-    }
-  } else {
-    screenOffChordStartedAt = 0;
+  // All three buttons have immediate global priority over every screen and
+  // gesture. While they remain held, sleepCanWake stays false until release.
+  if (stableMask == (0x01 | 0x02 | 0x04)) {
+    turnDisplayOffAndLock();
+    return;
   }
 
   if (stableChanged) {
@@ -3232,9 +3691,9 @@ void setup() {
   Serial.println("==============================================");
   Serial.println(" SmartPanel - DIAGNOSTICO DE BOTONES ACTIVO");
   Serial.println(" Monitor Serie: 115200 baudios");
-  Serial.println(" IZQUIERDA = GPIO18");
-  Serial.println(" CENTRO    = GPIO19");
-  Serial.println(" DERECHA   = GPIO20");
+  Serial.println(" IZQUIERDA = GPIO3");
+  Serial.println(" CENTRO    = GPIO23");
+  Serial.println(" DERECHA   = GPIO0");
   Serial.println(" Cada boton debe conectar su GPIO con GND.");
   Serial.println("==============================================");
   Serial.println();

@@ -51,6 +51,8 @@ only Android-to-SmartPanel transport. See
 - OpenRouter sessions kept only in Android memory;
 - manual CoinMarketCap refresh from physical LEFT+CENTER only;
 - configurable safe TFT brightness;
+- up to eight persistent local notes, written and read entirely on the ESP32-C6
+  without the phone, BLE, Home Assistant, or Wi-Fi;
 - local Flappy Bird game and high score on the firmware.
 
 ## Firmware requirements
@@ -98,7 +100,8 @@ The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
 5. Android waits for bonding, connects GATT, subscribes to TX, sends `hello`, and
    validates protocol 2 plus the real `chip_id`.
 
-If a replacement phone needs the PIN, press LEFT+RIGHT while the panel is locked.
+If a replacement phone needs the PIN, begin pairing from Android; the panel
+displays the PIN automatically when it receives the secure pairing request.
 If an existing Android bond is broken, forget the device in Android Bluetooth
 settings and pair again.
 
@@ -148,12 +151,30 @@ notification archives are not stored.
 
 - unlock: CENTER, LEFT, RIGHT;
 - back: LEFT+RIGHT while unlocked;
-- show pairing PIN: LEFT+RIGHT while locked;
 - refresh CoinMarketCap: LEFT+CENTER on locked home;
-- lock and turn off backlight: hold CENTER+RIGHT for 1.2 seconds;
+- lock and turn off backlight from any screen: press LEFT+CENTER+RIGHT together;
 - wake: any button; the wake press is discarded;
 - auto-lock: 60 seconds, without turning off the display;
 - Flappy Bird: CENTER flaps, RIGHT restarts after game over, LEFT+RIGHT exits.
+
+The locked home screen intentionally does not display the unlock sequence.
+
+## Local notes
+
+Notes are stored only in the ESP32-C6 NVS and do not depend on Android, BLE,
+Home Assistant, or Wi-Fi. The firmware stores up to eight notes, with a title of
+up to 36 characters and content of up to 900 characters.
+
+- enter **Notas** from the panel menu;
+- LEFT/RIGHT selects a note and CENTER opens it;
+- CENTER+RIGHT in the notes list creates a note and starts in the title field;
+- in the editor, LEFT/RIGHT selects a keyboard key and CENTER types it;
+- CENTER+LEFT alternates between title and content;
+- the `NL` keyboard key inserts a new line while editing content;
+- LEFT+RIGHT saves the note and opens the complete reading view;
+- in reading view, LEFT scrolls up and RIGHT scrolls down;
+- CENTER+LEFT edits the open note;
+- LEFT+RIGHT returns from the reading view to the notes list.
 
 ## Security and privacy
 
@@ -162,7 +183,8 @@ keys, Wi-Fi passwords, release signing keystores, or keystore passwords. Example
 must use `YOUR_TOKEN`, `YOUR_API_KEY`, and `YOUR_WIFI_PASSWORD`.
 
 Retained Android secrets use Android Keystore plus AES/GCM. Wi-Fi passwords, AI
-history, and historical notification content are not persisted. See
+history, and historical notification content are not persisted. Local note text
+is persisted unencrypted in the ESP32-C6 NVS and never sent to Android or Wi-Fi. See
 [SECURITY.md](SECURITY.md).
 
 ## Troubleshooting

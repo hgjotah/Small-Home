@@ -26,7 +26,12 @@ Android stores retained API credentials with an AES/GCM key held by Android
 Keystore. Wi-Fi passwords, AI conversation history, and notification history are
 not persisted by the Android app.
 
+Local notes are intentionally stored unencrypted in the ESP32-C6 NVS so they
+remain available without a phone or network connection. They are never included
+in the BLE protocol and are never transmitted over Wi-Fi. Anyone with physical
+access to the device or its flash may be able to recover their contents; do not
+store passwords or other high-value secrets in notes.
+
 The firmware currently accepts self-signed HTTPS endpoints by using an insecure
 TLS verifier. See the firmware header and install a trusted CA for hardened
 deployments.
-

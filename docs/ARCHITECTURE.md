@@ -40,7 +40,8 @@ flowchart LR
   persist panel configuration in NVS;
 - use Wi-Fi directly for NTP, Home Assistant, and manual CoinMarketCap refresh;
 - own light/thermostat roles, derive each selected entity's real HA service
-  domain, and own lock/button behavior, brightness, and Flappy Bird;
+  domain, and own lock/button behavior, brightness, persistent offline notes,
+  and Flappy Bird;
 - request notification dismissal and AI work from Android over BLE.
 
 ## Connection sequence
