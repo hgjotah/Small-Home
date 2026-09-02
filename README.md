@@ -168,6 +168,7 @@ up to 36 characters and content of up to 900 characters.
 - enter **Notas** from the panel menu;
 - LEFT/RIGHT selects a note and CENTER opens it;
 - CENTER+RIGHT in the notes list creates a note and starts in the title field;
+- LEFT+CENTER in the notes list deletes the selected note immediately;
 - in the editor, LEFT/RIGHT selects a keyboard key and CENTER types it;
 - CENTER+LEFT alternates between title and content;
 - the `NL` keyboard key inserts a new line while editing content;

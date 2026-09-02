@@ -2046,6 +2046,26 @@ void openCurrentNote() {
   screen = SCREEN_NOTE_VIEW;
 }
 
+void deleteCurrentNote() {
+  if (noteCount == 0 || noteIndex >= noteCount) return;
+
+  for (uint8_t i = noteIndex; i + 1 < noteCount; i++) {
+    notes[i] = notes[i + 1];
+  }
+  notes[noteCount - 1].title = "";
+  notes[noteCount - 1].content = "";
+  noteCount--;
+
+  if (noteCount == 0) {
+    noteIndex = 0;
+  } else if (noteIndex >= noteCount) {
+    noteIndex = noteCount - 1;
+  }
+
+  saveNotes();
+  showToast("Nota eliminada", 1200);
+}
+
 void saveEditedNote() {
   if (noteEditingIndex >= MAX_NOTES) return;
 
@@ -3363,6 +3383,10 @@ void handleButtonGesture(uint8_t mask) {
   // Notes use chords that intentionally differ from the rest of the UI.
   if (unlocked && screen == SCREEN_NOTES_LIST && mask == (0x02 | 0x04)) {
     beginNewNote();
+    return;
+  }
+  if (unlocked && screen == SCREEN_NOTES_LIST && mask == (0x01 | 0x02)) {
+    deleteCurrentNote();
     return;
   }
   if (unlocked && screen == SCREEN_NOTE_EDITOR && mask == (0x01 | 0x02)) {

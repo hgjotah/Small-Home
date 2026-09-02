@@ -7,7 +7,8 @@ application ID `com.ia.smallhome`, version `1.0`.
 
 ## ESP32-C6 (reflash required)
 
-This firmware build includes persistent offline notes and the global
+This firmware build includes persistent offline notes, direct deletion of the
+selected note with LEFT+CENTER from the notes list, and the global
 LEFT+CENTER+RIGHT lock/screen-off shortcut.
 
 The recommended update method is Arduino IDE:
@@ -39,9 +40,9 @@ using the six-digit PIN shown by the panel.
 
 ```text
 60624fcae03a89ae9f888ddd70f342dcc2704c33eafc9771d019dba5d91d02b7  Small-Home-debug.apk
-2b359e4985982e1eae4ff6fc22c46c8bad2d59909a80e4532a0f4cb2dd450bfb  SmallHome-ESP32C6-app.bin
+c826f1388acda1fb2ce32564209a96d86fe3ba0d1a1509253039a75d7268b988  SmallHome-ESP32C6-app.bin
 f94c5d786a7a8fab06ac5d10e33bf37711a6697636dc037559ea19cc410a17f0  SmallHome-ESP32C6-boot_app0.bin
 02f53243e1ded001d79f109e938846d72bd85a91bee7a3513e4094d7c090975c  SmallHome-ESP32C6-bootloader.bin
-a4d16616dbcb670f4443d6fceb15d27d2d6f31fea49df195ce9a37325774fb54  SmallHome-ESP32C6-merged.bin
+0fa6ee86d7c529fa0cecce7939db76732b7bb98129a130a849520c4a1ba120a5  SmallHome-ESP32C6-merged.bin
 aaae2888c5a6a348004b5b436f47abb25ae32e72d9003902955a998eda723edd  SmallHome-ESP32C6-partitions.bin
 ```
