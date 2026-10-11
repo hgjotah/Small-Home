@@ -2,17 +2,21 @@
 
 Small Home is the Android companion for SmartPanel C6: a compact physical panel
 that puts Home Assistant lights, a thermostat, selected phone notifications,
-CoinMarketCap, and OpenRouter-powered answers on a 1.47-inch display.
+CoinMarketCap, OpenRouter-powered answers, local notes, games, and offline movie
+playback on a 1.47-inch display.
 
 ## Hardware
 
 - Waveshare ESP32-C6-LCD-1.47, **non-touch** version;
 - integrated 172x320 ST7789 TFT;
+- onboard microSD / TF slot (FAT32), used for movies;
 - three external momentary buttons;
 - USB-C power;
 - 2.4 GHz Wi-Fi.
 
-See [docs/WIRING.md](docs/WIRING.md) for the button wiring.
+See [docs/WIRING.md](docs/WIRING.md) for the button wiring. The microSD slot is
+part of the board and needs no extra wiring: it shares the LCD's SCLK and MOSI
+lines (chip select GPIO4, MISO GPIO5).
 
 ## Architecture
 
@@ -44,7 +48,11 @@ only Android-to-SmartPanel transport. See
 - configurable safe TFT brightness;
 - up to eight persistent local notes, written and read entirely on the ESP32-C6
   without the phone, BLE, Home Assistant, or Wi-Fi;
-- local Flappy Bird game and high score on the firmware.
+- local Flappy Bird game and high score on the firmware;
+- offline movie player (**Peliculas**): MJPEG playback from the onboard microSD,
+  10-second seek, pause/resume, a time overlay, and a resume position kept in NVS;
+- `video_to_mjpeg.py`, a desktop converter that turns any video into the MJPEG
+  and index files the player expects.
 
 ## Firmware requirements
 
@@ -52,7 +60,11 @@ only Android-to-SmartPanel transport. See
 - `esp32 by Espressif Systems`, core 3.x;
 - board: `ESP32C6 Dev Module`;
 - `GFX Library for Arduino` (`Arduino_GFX`);
-- `ArduinoJson` 7.x.
+- `ArduinoJson` 7.x;
+- `JPEGDEC` 1.8.x (movie playback).
+
+`SmallHomeVideo.h` (the movie player) must stay in the sketch folder next to
+`SmartPanel_C6_BLE.ino`.
 
 ## Flashing the firmware
 
@@ -61,7 +73,7 @@ only Android-to-SmartPanel transport. See
 3. In **Tools > Partition Scheme**, select **Huge APP (3MB No OTA/1MB SPIFFS)**.
    The default 1.2MB application partition is too small for the BLE, TLS and TFT
    features used by this firmware.
-4. Install the two external libraries listed above.
+4. Install the three external libraries listed above.
 5. Compile and upload.
 6. Reboot the board. The TFT shows `SmartPanel-C6-XXXX` and its six-digit BLE
    pairing PIN when setup is required.
@@ -146,7 +158,8 @@ notification archives are not stored.
 - lock and turn off backlight from any screen: press LEFT+CENTER+RIGHT together;
 - wake: any button; the wake press is discarded;
 - auto-lock: 60 seconds, without turning off the display;
-- Flappy Bird: CENTER flaps, RIGHT restarts after game over, LEFT+RIGHT exits.
+- Flappy Bird: CENTER flaps, RIGHT restarts after game over, LEFT+RIGHT exits;
+- Peliculas: LEFT/RIGHT seek 10 seconds, CENTER pauses/resumes, LEFT+RIGHT exits.
 
 The locked home screen intentionally does not display the unlock sequence.
 
@@ -167,6 +180,58 @@ up to 36 characters and content of up to 900 characters.
 - in reading view, LEFT scrolls up and RIGHT scrolls down;
 - CENTER+LEFT edits the open note;
 - LEFT+RIGHT returns from the reading view to the notes list.
+
+## Movies
+
+The **Peliculas** menu entry plays video from the onboard microSD card without the
+phone, BLE, Home Assistant, or Wi-Fi. Playback is MJPEG with no audio, decoded on
+the ESP32-C6 and drawn at 320x172.
+
+### Preparing a movie
+
+Use `video_to_mjpeg.py` on your computer. It needs Python 3 and
+[FFmpeg](https://ffmpeg.org/) in `PATH`.
+
+```text
+python video_to_mjpeg.py                 # opens a file picker
+python video_to_mjpeg.py movie.mkv       # converts that file directly
+python video_to_mjpeg.py movie.mkv --name film --fps 15 --quality 12
+```
+
+The converter writes two files with the same base name:
+
+- `<name>.mjpeg` — the baseline JPEG frames, concatenated;
+- `<name>.mji` — the Small-Home Video Index v1: exact duration plus one offset per
+  second, used for resuming and for the +/-10 s seek.
+
+Copy **both** files to the `/mjpeg` folder of a FAT32 microSD card and insert it in
+the board before opening **Peliculas**.
+
+| Option | Default | Notes |
+|---|---:|---|
+| `--fps` | 15 | 10 to 24. Lower values give smaller files and smoother decoding. |
+| `--quality` | 12 | FFmpeg JPEG quality, 2 to 31. A higher number means a smaller file. |
+| `--width` / `--height` | 320 / 172 | Must be even; match the panel. Do not change unless the firmware changes. |
+| `--name` | video name | ASCII only. Keep it to 8 characters if your FAT setup lacks long names. |
+| `--output-dir` | next to the video | Output folder. |
+| `--overwrite` | off | Overwrite existing outputs without asking. |
+
+FAT32 limits one file to 4 GiB, so the converter refuses larger outputs. Lower
+`--fps` or raise `--quality` for long movies. The `.mji` layout is shared by the
+script and the firmware; change neither without the other.
+
+### Playback
+
+- LEFT / RIGHT seek 10 seconds back / forward;
+- CENTER pauses and resumes;
+- LEFT+RIGHT leaves the player;
+- a time overlay appears for 3 seconds after any control is used;
+- the resume position is stored in the ESP32-C6 NVS.
+
+While a movie is actually playing, the firmware stops servicing BLE messages and
+Wi-Fi/Home Assistant maintenance and disables auto-lock, so decoding is not
+interrupted. The three-button lock combination still works. Pause or leave the
+player to let the panel catch up with the phone.
 
 ## Security and privacy
 
@@ -191,13 +256,25 @@ is persisted unencrypted in the ESP32-C6 NVS and never sent to Android or Wi-Fi.
 - **No notifications:** enable Notification Access and select the source app.
 - **OpenRouter errors:** check the key, account credit, rate limits, and exact
   model ID.
+- **Firmware does not compile (`SmallHomeVideo.h` not found):** the movie player
+  header must be in the same folder as the `.ino`; also install `JPEGDEC`.
+- **Peliculas shows no movie or the card fails:** use a FAT32 card, put both the
+  `.mjpeg` and `.mji` files in `/mjpeg`, and keep ASCII file names (short ones if
+  needed). Re-run the converter if the index is missing.
+- **Movie stutters:** convert again with a lower `--fps` or a higher `--quality`
+  number.
+- **Phone data is late after a movie:** BLE and Wi-Fi are paused during playback;
+  pause or exit the player.
 
 ## Repository structure
 
 - `app/` — Kotlin/Compose Android application;
 - `firmware/SmartPanel_C6_BLE/` — ESP32-C6 firmware;
+- `video_to_mjpeg.py` — video to MJPEG + index converter for the movie player;
 - `docs/` — wire protocol, architecture, and wiring;
 - `branding/` — Small Home logo masters;
+- `Small Home 3D Case.stl` — 3D-printable case model;
+- `release/` — flashing instructions and checksums for the prebuilt binaries;
 - `.github/workflows/android.yml` — Android continuous integration.
 
 ## Contributing and license
