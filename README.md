@@ -4,15 +4,6 @@ Small Home is the Android companion for SmartPanel C6: a compact physical panel
 that puts Home Assistant lights, a thermostat, selected phone notifications,
 CoinMarketCap, and OpenRouter-powered answers on a 1.47-inch display.
 
-The name is a play on “Smart Home” and a literal description: useful parts of a
-home fit into a very small device.
-
-## Screenshots
-
-The launcher artwork is available in `branding/`. Add real app screenshots under
-`docs/images/` as `app-home.png`, `ble-pairing.png`, and `home-assistant.png` when
-publishing store or release documentation.
-
 ## Hardware
 
 - Waveshare ESP32-C6-LCD-1.47, **non-touch** version;
