@@ -52,6 +52,9 @@
       Session context is maintained by Android until leaving the AI screen.
     - Flappy Bird: fully offline mini-game. CENTER = flap, RIGHT = restart after game over,
       LEFT+RIGHT = exit. High score is stored in NVS.
+    - Movies: MJPEG playback from the onboard microSD. LEFT/RIGHT seek 10 seconds,
+      CENTER pauses/resumes, and LEFT+RIGHT exits. A YouTube-style time overlay is
+      shown for 3 seconds after controls are used. Resume position is stored in NVS.
 
   Required Arduino environment:
     - Board package: "esp32 by Espressif Systems", ESP32 Arduino core 3.x
@@ -60,6 +63,7 @@
     - Libraries:
         * GFX Library for Arduino (Arduino_GFX)
         * ArduinoJson 7.x
+        * JPEGDEC 1.8.x
       BLE, WiFi, HTTPClient, Preferences and WiFiClientSecure come with the ESP32 core.
 
   Important:
@@ -80,6 +84,10 @@
 #include <Preferences.h>
 #include <ArduinoJson.h>
 #include <Arduino_GFX_Library.h>
+#include <SPI.h>
+#include <SD.h>
+#include <JPEGDEC.h>
+#include "SmallHomeVideo.h"
 
 #include <BLEDevice.h>
 #include <BLEUtils.h>
@@ -104,6 +112,10 @@ static const uint8_t LCD_DC   = 15;
 static const uint8_t LCD_RST  = 21;
 static const uint8_t LCD_BL   = 22;
 
+// Onboard microSD / TF card (shares SCLK + MOSI with the LCD).
+static const uint8_t SD_CS   = 4;
+static const uint8_t SD_MISO = 5;
+
 static const int16_t PANEL_RAW_W = 172;
 static const int16_t PANEL_RAW_H = 320;
 static const int16_t LCD_W = 320;   // logical width after rotation=3
@@ -111,15 +123,15 @@ static const int16_t LCD_H = 172;   // logical height after rotation=3
 static const uint8_t BACKLIGHT_DEFAULT = 110; // 0..255, ~43%
 static const bool LCD_INVERT_COLORS = false;
 
-Arduino_DataBus *displayBus = new Arduino_ESP32SPI(
-  LCD_DC, LCD_CS, LCD_SCLK, LCD_MOSI, GFX_NOT_DEFINED
+Arduino_DataBus *displayBus = new Arduino_HWSPI(
+  LCD_DC, LCD_CS, LCD_SCLK, LCD_MOSI, SD_MISO
 );
 
 Arduino_GFX *gfx = new Arduino_ST7789(
   displayBus,
   LCD_RST,
   3,        // LANDSCAPE rotated 180 deg vs previous orientation; still 320x172
-  false,
+  true,
   PANEL_RAW_W,
   PANEL_RAW_H,
   34, 0,
@@ -127,26 +139,28 @@ Arduino_GFX *gfx = new Arduino_ST7789(
 );
 
 // -----------------------------------------------------------------------------
-// Palette — deliberately restrained / dark, matching the Android app direction
+// Palette — Small-Home "Ivory & Gold"
 // -----------------------------------------------------------------------------
-static const uint16_t C_BG       = RGB565(10, 14, 20);
-static const uint16_t C_SURFACE  = RGB565(17, 24, 33);
-static const uint16_t C_SURFACE2 = RGB565(24, 34, 45);
-static const uint16_t C_TEXT     = RGB565(242, 245, 247);
-static const uint16_t C_MUTED    = RGB565(154, 167, 181);
-static const uint16_t C_MINT     = RGB565(99, 230, 190);
-static const uint16_t C_BLUE     = RGB565(124, 131, 255);
-static const uint16_t C_PURPLE   = RGB565(167, 139, 250);
-static const uint16_t C_GOLD     = RGB565(245, 185, 66);
-static const uint16_t C_GREEN    = RGB565(74, 222, 128);
-static const uint16_t C_RED      = RGB565(255, 107, 107);
-static const uint16_t C_SKY      = RGB565(67, 167, 255);
+static const uint16_t C_BG = RGB565(255, 255, 255);
+static const uint16_t C_SURFACE  = RGB565(22, 21, 18);
+static const uint16_t C_SURFACE2 = RGB565(31, 29, 24);
+static const uint16_t C_TEXT = RGB565(255, 255, 255);
+static const uint16_t C_MUTED    = RGB565(166, 160, 146);
+static const uint16_t C_GOLD     = RGB565(218, 180, 91);
+static const uint16_t C_GOLD2    = RGB565(238, 211, 146);
+static const uint16_t C_MINT     = C_GOLD2;
+static const uint16_t C_BLUE     = C_GOLD;
+static const uint16_t C_PURPLE   = C_GOLD2;
+static const uint16_t C_GREEN    = C_GOLD2;
+static const uint16_t C_SKY      = C_TEXT;
+static const uint16_t C_RED      = RGB565(235, 112, 105);
 static const uint16_t C_WHITE    = RGB565(255, 255, 255);
 static const uint16_t C_BLACK    = RGB565(0, 0, 0);
-static const uint16_t C_PIPE     = RGB565(84, 194, 105);
-static const uint16_t C_PIPE_DK  = RGB565(39, 128, 63);
-static const uint16_t C_BIRD     = RGB565(255, 214, 74);
-static const uint16_t C_BIRD_OR  = RGB565(255, 145, 54);
+// Flappy Bird keeps a little of its own game palette.
+static const uint16_t C_PIPE     = RGB565(173, 151, 83);
+static const uint16_t C_PIPE_DK  = RGB565(91, 76, 42);
+static const uint16_t C_BIRD     = RGB565(255, 223, 117);
+static const uint16_t C_BIRD_OR  = RGB565(225, 174, 76);
 
 // -----------------------------------------------------------------------------
 // Protocol / limits
@@ -213,6 +227,7 @@ struct PanelConfig {
 
 Preferences prefs;
 PanelConfig cfg;
+SmallHomeVideo videoPlayer;
 uint32_t blePasskey = 0;
 uint32_t flappyHighScore = 0;
 
@@ -268,13 +283,14 @@ enum ScreenState : uint8_t {
   SCREEN_FLAPPY,
   SCREEN_NOTES_LIST,
   SCREEN_NOTE_EDITOR,
-  SCREEN_NOTE_VIEW
+  SCREEN_NOTE_VIEW,
+  SCREEN_VIDEO
 };
 
 ScreenState screen = SCREEN_HOME_LOCKED;
 bool unlocked = false;
 uint8_t menuIndex = 0;
-static const uint8_t MENU_COUNT = 6;
+static const uint8_t MENU_COUNT = 7;
 static const uint8_t UNLOCK_SEQ[3] = {0x02, 0x01, 0x04}; // CENTER, LEFT, RIGHT
 uint8_t unlockPos = 0;
 
@@ -520,6 +536,7 @@ void drawStatusDot(int16_t x, int16_t y, bool ok, uint16_t okColor = C_MINT) {
 
 void drawCard(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t fill = C_SURFACE) {
   gfx->fillRoundRect(x, y, w, h, 9, fill);
+  gfx->drawRoundRect(x, y, w, h, 9, C_SURFACE2);
 }
 
 void drawDivider(int16_t y) {
@@ -533,6 +550,7 @@ void drawHeader(const String &title, uint16_t accent = C_MINT) {
   gfx->setTextColor(C_TEXT);
   gfx->setCursor(23, 7);
   gfx->print(ellipsize(title, 19));
+  gfx->drawFastHLine(10, 28, LCD_W - 20, C_SURFACE2);
 
   drawStatusDot(285, 14, WiFi.status() == WL_CONNECTED, C_MINT);
   drawStatusDot(306, 14, mobileConnected(), C_BLUE);
@@ -547,10 +565,12 @@ void drawFooterHint(const String &left, const String &center, const String &righ
   gfx->setCursor(10, 158);
   gfx->print(left);
 
+  gfx->setTextColor(C_GOLD);
   int16_t cx = (LCD_W - (int16_t)center.length() * 6) / 2;
   gfx->setCursor(cx, 158);
   gfx->print(center);
 
+  gfx->setTextColor(C_MUTED);
   int16_t rx = LCD_W - 10 - (int16_t)right.length() * 6;
   gfx->setCursor(rx, 158);
   gfx->print(right);
@@ -2612,12 +2632,17 @@ void drawMenuIcon(uint8_t idx, int16_t cx, int16_t cy, uint16_t color) {
       gfx->drawFastHLine(cx - 7, cy, 15, color);
       gfx->drawFastHLine(cx - 7, cy + 7, 11, color);
       break;
+    case 6:
+      gfx->drawRoundRect(cx - 15, cy - 11, 30, 22, 5, color);
+      gfx->fillTriangle(cx - 4, cy - 7, cx - 4, cy + 7, cx + 9, cy, color);
+      gfx->drawFastHLine(cx - 9, cy + 15, 18, color);
+      break;
   }
 }
 
 void drawMenu() {
-  static const char *NAMES[MENU_COUNT] = {"Notificaciones", "Luces", "Termostato", "IA", "Flappy Bird", "Notas"};
-  static const uint16_t COLORS[MENU_COUNT] = {C_BLUE, C_GOLD, C_RED, C_PURPLE, C_GREEN, C_MINT};
+  static const char *NAMES[MENU_COUNT] = {"Notificaciones", "Luces", "Termostato", "IA", "Flappy Bird", "Notas", "Peliculas"};
+  static const uint16_t COLORS[MENU_COUNT] = {C_GOLD, C_GOLD2, C_GOLD, C_GOLD2, C_GOLD, C_GOLD2, C_GOLD};
 
   gfx->fillScreen(C_BG);
   drawHeader("PANEL", COLORS[menuIndex]);
@@ -3199,6 +3224,7 @@ void drawCurrentScreen() {
     case SCREEN_AI_WAIT:        drawAiWait(); break;
     case SCREEN_AI_RESPONSE:    drawAiResponse(); break;
     case SCREEN_FLAPPY:         drawFlappy(); break;
+    case SCREEN_VIDEO:          videoPlayer.draw(); break;
   }
 
   uiDirty = false;
@@ -3235,6 +3261,10 @@ void lockPanel() {
     noteDraftTitle = "";
     noteDraftContent = "";
     noteEditingNew = false;
+  }
+
+  if (screen == SCREEN_VIDEO) {
+    videoPlayer.leave();
   }
 
   unlocked = false;
@@ -3338,6 +3368,11 @@ void activateMenuItem() {
       noteIndex = 0;
       screen = SCREEN_NOTES_LIST;
       break;
+
+    case 6:
+      videoPlayer.enter();
+      screen = SCREEN_VIDEO;
+      break;
   }
 }
 
@@ -3359,6 +3394,11 @@ void handleBackGesture() {
     case SCREEN_FLAPPY:
       gameRunning = false;
       gameOver = false;
+      screen = SCREEN_MENU;
+      break;
+
+    case SCREEN_VIDEO:
+      videoPlayer.leave();
       screen = SCREEN_MENU;
       break;
 
@@ -3569,6 +3609,10 @@ void handleButtonGesture(uint8_t mask) {
       }
       break;
 
+    case SCREEN_VIDEO:
+      videoPlayer.handleButton(mask);
+      break;
+
     default:
       break;
   }
@@ -3722,6 +3766,11 @@ void setup() {
   Serial.println("==============================================");
   Serial.println();
 
+  // LCD + microSD share the same hardware SPI bus on the Waveshare board.
+  pinMode(SD_CS, OUTPUT);
+  digitalWrite(SD_CS, HIGH);
+  SPI.begin(LCD_SCLK, SD_MISO, LCD_MOSI, SD_CS);
+
   // Backlight PWM using Arduino-ESP32 core 3.x API.
   ledcAttach(LCD_BL, 5000, 8);
   setBacklight(0);
@@ -3734,6 +3783,7 @@ void setup() {
   gfx->fillScreen(C_BG);
 
   loadConfig();
+  videoPlayer.begin(gfx, &prefs, &SPI, SD_CS, LCD_W, LCD_H);
 
   setBacklight(cfg.brightness);
 
@@ -3760,13 +3810,25 @@ void setup() {
 }
 
 void loop() {
-  serviceBleEvents();
-  serviceBleIncoming();
-  serviceWiFi();
+  // During actual movie playback we deliberately stop polling secondary
+  // application services. The radio stacks keep their own low-level state,
+  // but Home Assistant/Wi-Fi maintenance and BLE JSON processing no longer
+  // steal time from JPEG decoding and TFT transfers.
+  bool videoWasPlaying = (screen == SCREEN_VIDEO && videoPlayer.isPlaying());
+
+  if (!videoWasPlaying) {
+    serviceBleEvents();
+    serviceBleIncoming();
+    serviceWiFi();
+  }
+
   updateButtons();
+
+  bool videoPlayingNow = (screen == SCREEN_VIDEO && videoPlayer.isPlaying());
 
   if (unlocked &&
       screen != SCREEN_FLAPPY &&
+      !videoPlayingNow &&
       millis() - lastInteractionMs >= AUTO_LOCK_MS) {
     lockPanel();
     showToast("Bloqueado", 1000);
@@ -3775,8 +3837,22 @@ void loop() {
   updateGame();
 
   if (!displaySleeping) {
-    // Flappy Bird genuinely needs continuous animation.
-    if (screen == SCREEN_FLAPPY) {
+    if (videoPlayingNow) {
+      // Button actions (pause/seek) mark the UI dirty; repaint the current
+      // compressed frame + overlay once, then return to streaming frames.
+      if (uiDirty) {
+        videoPlayer.draw();
+        uiDirty = false;
+      }
+
+      if (videoPlayer.update()) {
+        // Movie finished or playback failed: videoPlayer has returned to its
+        // library state, so draw that screen immediately.
+        uiDirty = true;
+        drawCurrentScreen();
+      }
+    } else if (screen == SCREEN_FLAPPY) {
+      // Flappy Bird genuinely needs continuous animation.
       if (millis() - lastUiDrawMs >= GAME_FRAME_MS) {
         lastUiDrawMs = millis();
         drawCurrentScreen();
